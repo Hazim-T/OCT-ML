@@ -1,19 +1,22 @@
 from utils import *
 
-# Shape: [25, 496, 512] - 25 slices of 496x512
+# Shape: (2, [25, 496, 512]) - 2 eyes, each have 25 slices of 496x512
 file_path = "eye.e2e"
-scan = import_oct(file_path)
-print("Original shape:", scan.shape)
-show_slices(scan, title="Original")
+scan = load_eye_tensors(file_path)
+left_eye = scan[0]
+right_eye = scan[1]
 
-scan = align_oct(scan, special_slice=1)
-print(scan.shape)
-show_slices(scan, title="Aligned")
+print("Original shape:", left_eye.shape)
+show_slices(left_eye, title="Original")
 
-scan = interpolate_scan(scan, method='linear')
-print("Interpolated shape:", scan.shape)
-show_slices(scan, x=5, y=10, title="Aligned + Interpolated")
+left_eye = align_oct(left_eye, special_slice=1)
+print(left_eye.shape)
+show_slices(left_eye, title="Aligned")
 
-scan = normalize(scan)
-scan = segment_eye_components(scan)
-plot_oct_3d(scan)
+left_eye = interpolate_scan(left_eye)
+print("Interpolated shape:", left_eye.shape)
+show_slices(left_eye, title="Aligned + Interpolated")
+
+left_eye = normalize(left_eye)
+left_eye = segment_eye_components(left_eye)
+plot_oct_3d(left_eye)

@@ -4,14 +4,74 @@ import eyepy as ep
 import skimage
 import torch
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import center_of_mass, minimum_filter
+import torch.nn.functional as F
+import os
 
 
-def import_oct(path):
-    volume = ep.import_heyex_e2e(path)
-    volume_data = torch.tensor(volume.data, dtype=torch.float32)
-    return volume_data
+def load_eye_tensors(full_path):
+    with ep.io.HeE2eReader(full_path) as reader:
+        data = reader.volumes
+
+    eye_tensors = []
+    for eye_volume in data:
+        bscans = eye_volume[0:]
+        bscan_list = [bscan.data for bscan in bscans]
+        eye_tensor = np.stack(bscan_list)
+
+        eye_tensors.append(eye_tensor)
+
+    return np.array(eye_tensors)
+
+
+def load_eye_tensors_with_labels(data_folder, df):
+    rejected = ["nan", "-", "false", "treated active", "treated inactive", "myopic cnv"]
+    wet_amd = ["mac. neovas. type 1-occult", "mac. neovas. type 2-classic", "mac. neovas. mixed type",
+               "mac. neovas. type 1-occult-inactive", "end stage exudutive amd"]
+    dry_amd = ["non-exudutive amd low risk", "non-exudutive amd high risk", "vitelliform deg", "geographic atrophy"]
+
+    wet, dry = 0, 0
+    accepted = []
+
+    for i in range(len(df)):
+        if (str(df[i][1]).lower() not in rejected or str(df[i][2]).lower() not in rejected) and (
+                str(df[i][0]).lower() not in rejected):
+            accepted.append(df[i])
+
+            if str(df[i][2]).lower() in wet_amd or str(df[i][1]).lower() in wet_amd:
+                wet += 1
+            elif str(df[i][2]).lower() in dry_amd or str(df[i][1]).lower() in dry_amd:
+                dry += 1
+            else:
+                print("problematic: ", df[i])
+
+    accepted = np.array(accepted)
+    eye_data = []
+    corrupted_counter = 0
+    for scan_info in accepted:
+        filename, first_eye_label, second_eye_label = scan_info[0], str(scan_info[1]).lower(), str(scan_info[2]).lower()
+        full_path = os.path.join(data_folder, filename)
+
+        try:
+            if os.path.exists(full_path):
+                eye_tensors = load_eye_tensors(full_path)
+                print(f"Loaded {filename}")
+                if first_eye_label not in rejected:
+                    eye_data.append((eye_tensors[0], 1 if first_eye_label in wet_amd else 0))
+                if second_eye_label not in rejected:
+                    eye_data.append((eye_tensors[1], 1 if second_eye_label in wet_amd else 0))
+            else:
+                print(f"File {filename} not found in {data_folder}")
+        except:
+            try:
+                if first_eye_label in rejected:
+                    eye_data.append((eye_tensors[0], 1 if second_eye_label in wet_amd else 0))
+            except Exception as e:
+                print(f"File {filename} issue", e)
+                corrupted_counter += 1
+
+    print(f"Bad file count: {corrupted_counter}",)
+    return np.array(eye_data, dtype=object)
 
 
 def normalize(data):
@@ -31,29 +91,17 @@ def show_slices(scan, x=5, y=5, title='plot'):
     plt.show()
 
 
-def interpolate_scan(scan, method='linear'):
-    scan = scan.numpy()
-    depth, height, width = scan.shape
+def resize_slices_2d(tensor_slices):
+    original_width = tensor_slices.shape[2]
+    original_height = tensor_slices.shape[1]
 
-    current_depths = np.arange(depth)
-    desired_depths = np.linspace(0, depth - 1, 2 * depth)
-
-    interpolator = RegularGridInterpolator(
-        (current_depths, np.arange(height), np.arange(width)),
-        scan,
-        method=method,  # method can be 'slinear'/'linear'(has very incorrect data on earlier slices) or 'cubic'(takes alot of computing)
-        bounds_error=False,
-        fill_value=None
-    )
-
-    depth_grid, height_grid, width_grid = np.meshgrid(desired_depths, np.arange(height), np.arange(width),
-                                                      indexing='ij')
-
-    return  torch.tensor(interpolator((depth_grid, height_grid, width_grid)), dtype=torch.float32)
+    if original_width != 512 or original_height != 496:
+        resized_slices = F.interpolate(tensor_slices.unsqueeze(0), size=(496, 512), mode='bilinear', align_corners=False)
+        return resized_slices.squeeze(0)
+    return tensor_slices
 
 
-def align_oct(oct_tensor, reference_slice_index=12, threshold=0, special_slice=None):
-    # special slice is written in number not index
+def align_oct(oct_tensor, reference_slice_index=17, threshold=0, special_slice=None):
     if special_slice is not None:
         special_slice -= 1
 
@@ -64,7 +112,6 @@ def align_oct(oct_tensor, reference_slice_index=12, threshold=0, special_slice=N
     reference_mask = reference_slice > threshold
     reference_com = center_of_mass(reference_mask)
 
-    # Handle the rest of the slices first, excluding the special slice
     for i in range(num_slices):
         if i == special_slice:
             continue
@@ -100,6 +147,19 @@ def align_oct(oct_tensor, reference_slice_index=12, threshold=0, special_slice=N
     return torch.tensor(aligned_tensor, dtype=torch.float32)
 
 
+def filter_and_normalize(tuple_tensor):
+    labels = []
+    accepted_eyes = []
+    eyes = tuple_tensor[:, 0]
+
+    for i in range(len(eyes)):
+        if eyes[i].shape[0] == 25:
+            accepted_eyes.append(align_oct(normalize(eyes[i])))
+            labels.append(tuple_tensor[:, 1][i])
+
+    return np.array(accepted_eyes), np.array(labels)
+
+
 def segment_eye_components(tensor):
     tensor = np.array(tensor)
     segmented_tensor = np.zeros_like(tensor)
@@ -108,7 +168,7 @@ def segment_eye_components(tensor):
         slice_img = tensor[i]
         smoothed_slice = minimum_filter(slice_img, size=(2, 2))
 
-        _, binary_img = cv2.threshold(smoothed_slice, np.mean(slice_img) * 0.5, 255, cv2.THRESH_BINARY)
+        _, binary_img = cv2.threshold(smoothed_slice, np.mean(slice_img) * 0.6, 255, cv2.THRESH_BINARY)
 
         labels = skimage.measure.label(binary_img, connectivity=2)
 
@@ -120,6 +180,13 @@ def segment_eye_components(tensor):
 
     segmented_tensor = align_oct(segmented_tensor)
     return segmented_tensor
+
+
+def interpolate_scan(scan, max_depth=25):
+    scan = scan.unsqueeze(0).unsqueeze(0)
+    scan = F.interpolate(scan, size=(max_depth, 496, 512), mode='trilinear', align_corners=False)
+    scan = scan.squeeze(0).squeeze(0)
+    return scan
 
 
 def plot_oct_3d(tensor):
