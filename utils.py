@@ -1,7 +1,8 @@
 import cv2
+import tensorflow as tf
 import matplotlib.pyplot as plt
 import eyepy as ep
-import skimage
+from skimage import measure
 import torch
 import numpy as np
 from scipy.ndimage import center_of_mass, minimum_filter
@@ -21,6 +22,7 @@ def load_eye_tensors(full_path):
 
         eye_tensors.append(eye_tensor)
 
+    del eye_tensor, data, bscans, bscan_list
     return np.array(eye_tensors)
 
 
@@ -69,6 +71,7 @@ def load_eye_tensors_with_labels(data_folder, df):
             except Exception as e:
                 print(f"File {filename} issue", e)
                 corrupted_counter += 1
+            
 
     print(f"Bad file count: {corrupted_counter}",)
     return np.array(eye_data, dtype=object)
@@ -89,16 +92,6 @@ def show_slices(scan, x=5, y=5, title='plot'):
 
     plt.suptitle(title)
     plt.show()
-
-
-def resize_slices_2d(tensor_slices):
-    original_width = tensor_slices.shape[2]
-    original_height = tensor_slices.shape[1]
-
-    if original_width != 512 or original_height != 496:
-        resized_slices = F.interpolate(tensor_slices.unsqueeze(0), size=(496, 512), mode='bilinear', align_corners=False)
-        return resized_slices.squeeze(0)
-    return tensor_slices
 
 
 def align_oct(oct_tensor, reference_slice_index=17, threshold=0, special_slice=None):
@@ -157,6 +150,7 @@ def filter_and_normalize(tuple_tensor):
             accepted_eyes.append(align_oct(normalize(eyes[i])))
             labels.append(tuple_tensor[:, 1][i])
 
+    del eyes, tuple_tensor
     return np.array(accepted_eyes), np.array(labels)
 
 
@@ -170,9 +164,10 @@ def segment_eye_components(tensor):
 
         _, binary_img = cv2.threshold(smoothed_slice, np.mean(slice_img) * 0.6, 255, cv2.THRESH_BINARY)
 
-        labels = skimage.measure.label(binary_img, connectivity=2)
+        labels = measure.label(binary_img, connectivity=2)
 
-        props = skimage.measure.regionprops(labels)
+        props = measure.regionprops(labels)
+
         if props:
             largest_component = max(props, key=lambda x: x.area)
             mask = labels == largest_component.label
@@ -180,13 +175,6 @@ def segment_eye_components(tensor):
 
     segmented_tensor = align_oct(segmented_tensor)
     return segmented_tensor
-
-
-def interpolate_scan(scan, max_depth=25):
-    scan = scan.unsqueeze(0).unsqueeze(0)
-    scan = F.interpolate(scan, size=(max_depth, 496, 512), mode='trilinear', align_corners=False)
-    scan = scan.squeeze(0).squeeze(0)
-    return scan
 
 
 def plot_oct_3d(tensor):
@@ -208,3 +196,15 @@ def plot_oct_3d(tensor):
     ax.view_init(roll=100, azim=195)
     ax.set_axis_off()
     plt.show()
+
+
+def downsample(arr, depth=25, height=240, width=240):
+    eyes = torch.tensor(arr)
+    eyes = eyes.unsqueeze(1)
+    eyes = F.interpolate(eyes,
+                         size=(depth, height, width),
+                         mode='trilinear',
+                         align_corners=False)
+    eyes = eyes.squeeze(1)
+
+    return np.array(eyes)
